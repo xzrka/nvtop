@@ -793,12 +793,35 @@ static void draw_temp_color(WINDOW *win, unsigned int temp, unsigned int temp_sl
   wnoutrefresh(win);
 }
 
+// The ceiling one of the temperatures beside the core one may be colored against:
+// what the driver reports for the memory where it reports one, and otherwise the
+// ceiling the core temperature is colored against. Without the second the two would
+// stand in the plain label color on a GeForce, whose driver reports no memory
+// ceiling, and would stay silent there while the same heat turns the core one yellow.
+static bool temp_ceiling_of_the_memory(const struct gpuinfo_static_info *static_info, unsigned *ceiling,
+                                       unsigned *warning_margin) {
+  if (GPUINFO_STATIC_FIELD_VALID(static_info, temperature_memory_max_threshold)) {
+    *ceiling = static_info->temperature_memory_max_threshold;
+    *warning_margin = 10;
+    return true;
+  }
+  if (GPUINFO_STATIC_FIELD_VALID(static_info, temperature_slowdown_threshold)) {
+    *ceiling = static_info->temperature_slowdown_threshold;
+    // the margin at which the core temperature turns yellow, so that the three agree
+    *warning_margin = 5;
+    return true;
+  }
+  *ceiling = 0;
+  *warning_margin = 0;
+  return false;
+}
+
 // One of the temperatures that sit next to the core one: the memory junction and
-// the memory itself. Only the ceiling the driver reports for the memory may color
-// them; where it reports none, as GeForce drivers do, the value stands on its own
-// rather than against a limit nvtop would have invented.
-static void draw_extra_temp(WINDOW *win, const char *label, unsigned int temp, unsigned int temp_max,
-                           bool has_temp_max, bool celsius) {
+// the memory itself. They are colored as the core one is, against the ceiling above;
+// where the driver reports no ceiling at all, the value stands on its own rather than
+// against a limit nvtop would have invented.
+static void draw_extra_temp(WINDOW *win, const char *label, unsigned int temp, unsigned int ceiling,
+                            unsigned int warning_margin, bool has_ceiling, bool celsius) {
   unsigned int temp_convert;
   if (celsius)
     temp_convert = temp;
@@ -808,10 +831,10 @@ static void draw_extra_temp(WINDOW *win, const char *label, unsigned int temp, u
   wcolor_set(win, cyan_color, NULL);
   mvwprintw(win, 0, 0, "%s", label);
 
-  if (has_temp_max) {
-    if (temp >= temp_max)
+  if (has_ceiling) {
+    if (temp >= ceiling)
       wcolor_set(win, red_color, NULL);
-    else if (temp + 10 >= temp_max)
+    else if (temp + warning_margin >= ceiling)
       wcolor_set(win, yellow_color, NULL);
     else
       wcolor_set(win, green_color, NULL);
@@ -1180,23 +1203,23 @@ static void draw_devices(struct list_head *devices, struct nvtop_interface *inte
     // Junction and memory temperatures, on the GPUs that report them. The core one
     // above says nothing about how hot the memory runs, which is the point of
     // showing them next to it.
+    unsigned int extra_ceiling;
+    unsigned int extra_warning_margin;
+    const bool has_extra_ceiling =
+        temp_ceiling_of_the_memory(&device->static_info, &extra_ceiling, &extra_warning_margin);
     if (dev->junction_temp != NULL) {
       werase(dev->junction_temp);
       if (GPUINFO_DYNAMIC_FIELD_VALID(&device->dynamic_info, junction_temp))
-        draw_extra_temp(dev->junction_temp, "JCT", device->dynamic_info.junction_temp,
-                        device->static_info.temperature_memory_max_threshold,
-                        GPUINFO_STATIC_FIELD_VALID(&device->static_info, temperature_memory_max_threshold),
-                        !interface->options.temperature_in_fahrenheit);
+        draw_extra_temp(dev->junction_temp, "JCT", device->dynamic_info.junction_temp, extra_ceiling,
+                        extra_warning_margin, has_extra_ceiling, !interface->options.temperature_in_fahrenheit);
       else
         draw_extra_temp_unavailable(dev->junction_temp, "JCT");
     }
     if (dev->vram_temp != NULL) {
       werase(dev->vram_temp);
       if (GPUINFO_DYNAMIC_FIELD_VALID(&device->dynamic_info, vram_temp))
-        draw_extra_temp(dev->vram_temp, "VRAM", device->dynamic_info.vram_temp,
-                        device->static_info.temperature_memory_max_threshold,
-                        GPUINFO_STATIC_FIELD_VALID(&device->static_info, temperature_memory_max_threshold),
-                        !interface->options.temperature_in_fahrenheit);
+        draw_extra_temp(dev->vram_temp, "VRAM", device->dynamic_info.vram_temp, extra_ceiling,
+                        extra_warning_margin, has_extra_ceiling, !interface->options.temperature_in_fahrenheit);
       else
         draw_extra_temp_unavailable(dev->vram_temp, "VRAM");
     }
