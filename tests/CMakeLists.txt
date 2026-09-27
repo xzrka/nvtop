@@ -1,3 +1,15 @@
+# The BAR0 junction and memory temperature reader is tested by standing a device tree
+# with the shape of sysfs, so it needs neither a GPU nor a test framework of its own.
+if (BUILD_TESTING)
+  add_executable(nvidia_vram_temps_test
+    nvidia_vram_temps_test.c
+    ${PROJECT_SOURCE_DIR}/src/nvidia_vram_temps.c
+  )
+  target_include_directories(nvidia_vram_temps_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/include)
+  add_test(NAME nvidia_vram_temps COMMAND nvidia_vram_temps_test)
+endif()
+
 find_package(GTest)
 if (BUILD_TESTING AND GTest_FOUND)
 

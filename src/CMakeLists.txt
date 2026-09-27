@@ -52,7 +52,7 @@ elseif(APPLE)
 endif()
 
 if(NVIDIA_SUPPORT)
-  target_sources(nvtop PRIVATE extract_gpuinfo_nvidia.c)
+  target_sources(nvtop PRIVATE extract_gpuinfo_nvidia.c nvidia_vram_temps.c)
 else()
   target_sources(nvtop PRIVATE nvlink_nvidia_disabled.c)
 endif()
