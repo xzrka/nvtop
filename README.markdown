@@ -135,8 +135,10 @@ junction, also called hot spot) and `VRAM` (the memory devices), come from
 registers of the GDDR6/GDDR6X/GDDR7 memory controller that no supported API
 reports. They are worth watching because the core temperature is the die reporting
 on itself while the memory runs hotter, and on these boards the memory is what the
-fan curve is really protecting. Boards that predate GDDR6 do not carry the sensors
-and are not read at all. Only the hottest junction channel and the hottest memory
+fan curve is really protecting. The offsets are those of Ampere and later, the
+generations the layouts were measured on; older boards, Turing with its GDDR6
+included, have something else at those addresses that decodes into a temperature no
+one would suspect, and are left alone. Only the hottest junction channel and the hottest memory
 device are reported. Where a sensor answers with nothing, an offset the controller
 does not implement or a converter with no thermistor wired to it, the field says
 `N/A` rather than a temperature that only looks like one.

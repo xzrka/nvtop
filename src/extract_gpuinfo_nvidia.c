@@ -1847,9 +1847,11 @@ bool nvtop_get_ecc_support(struct gpu_info *_gpu_info) {
 }
 
 // The junction and memory temperatures are read from registers of the memory
-// controller, see nvidia_vram_temps.h. Boards that predate GDDR6 do not carry the
-// sensors, and the offsets they have instead only answer with their own contents,
-// so they are left alone.
+// controller, see nvidia_vram_temps.h. The offsets are those of the generations the
+// layouts were measured on, Ampere and later. Older boards either have no such
+// sensor or have something else at the same address that decodes into a temperature
+// no one would suspect, which is worse than showing nothing; Turing has GDDR6 memory
+// and is left alone for the same reason, its registers having never been measured.
 static bool device_may_have_vram_sensors(unsigned int architecture) {
   switch (architecture) {
   case NVML_DEVICE_ARCH_KEPLER:

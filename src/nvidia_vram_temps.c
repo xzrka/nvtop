@@ -146,8 +146,9 @@ static bool is_blackwell_device(uint16_t pci_device_id) {
   }
 }
 
-// The GDDR6 registers mean nothing on the architectures that predate GDDR6, where
-// reading them only returns values that look plausible.
+// The GDDR6 offsets belong to the generations the layouts were measured on. On older
+// architectures, Turing included, reading them returns values that look plausible
+// without being temperatures, so such a board is said to have no sensors at all.
 static bool layout_is_known(uint16_t pci_device_id, bool gddr6_capable) {
   if (!pci_device_id)
     return false;
