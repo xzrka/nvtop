@@ -238,6 +238,55 @@ static void test_blackwell_sensors(void) {
   free(registers);
 }
 
+// The answers that are no temperature, which is what decides whether a field is
+// shown at all rather than a number that only looks like one
+static void test_answers_that_are_no_temperature(void) {
+  printf("Answers that are no temperature\n");
+  uint8_t *registers = register_image();
+
+  // An offset nothing drives answers with the pattern of an unimplemented register,
+  // and that pattern happens to hold a plausible 80C in the byte the junction is
+  // read from: the difference between a board without the sensor and a hot one.
+  write_le32(registers, GDDR6_JUNCTION_THERM_OFFSET, 0xBADF5040u);
+  write_le32(registers, GDDR6_VRAM_ADC_OFFSET, 0xBADF1002u);
+  fake_device("0000:01:00.0", 0x2504, registers);
+
+  enum nvidia_vram_temps_status status = nvidia_vram_temps_unsupported;
+  nvidia_vram_temps *temps = nvidia_vram_temps_open(0, 0x01, 0, 0, 0x2504, true, &status);
+  check_status("open", nvidia_vram_temps_ok, status);
+  if (!temps) {
+    failures++;
+    free(registers);
+    return;
+  }
+
+  unsigned junction = NVTOP_TEMPERATURE_INVALID, vram = NVTOP_TEMPERATURE_INVALID;
+  check("the pattern of an unimplemented offset", 0, nvidia_vram_temps_read(temps, &junction, &vram));
+  check("junction", NVTOP_TEMPERATURE_INVALID, junction);
+  check("vram", NVTOP_TEMPERATURE_INVALID, vram);
+  nvidia_vram_temps_close(temps);
+
+  // A board with no thermistor wired to the memory converter: the converter counts
+  // nothing, forever, next to a junction register that reads like any other. This is
+  // how the RTX 3050 of the board this was found on answers.
+  write_le32(registers, GDDR6_JUNCTION_THERM_OFFSET, 69u << 8);
+  write_le32(registers, GDDR6_VRAM_ADC_OFFSET, 0u);
+  fake_device("0000:01:00.0", 0x2504, registers);
+  temps = nvidia_vram_temps_open(0, 0x01, 0, 0, 0x2504, true, &status);
+  if (!temps) {
+    printf("  FAIL %-44s open with a converter counting nothing\n", "open");
+    failures++;
+    free(registers);
+    return;
+  }
+  check("the junction is still read", 1, nvidia_vram_temps_read(temps, &junction, &vram));
+  check("junction temperature", 69, junction);
+  check("a converter counting nothing", NVTOP_TEMPERATURE_INVALID, vram);
+  nvidia_vram_temps_close(temps);
+
+  free(registers);
+}
+
 static void test_uncovered_devices(void) {
   printf("Boards the register layouts do not cover\n");
   uint8_t *registers = register_image();
@@ -263,9 +312,9 @@ static void test_uncovered_devices(void) {
   if (temps) {
     check("read through the sysfs device id", 1, nvidia_vram_temps_read(temps, &junction, &vram));
     check("junction temperature", 68, junction);
-    // A register no board drives answers as 0°C: the decoding follows gputemps and
-    // reports what the register holds rather than inventing a plausibility rule.
-    check("a zeroed register reads as zero", 0, vram);
+    // Nothing is wired to the converter of a board whose register image was made
+    // without one, and a converter counting nothing is no temperature.
+    check("a converter counting nothing", NVTOP_TEMPERATURE_INVALID, vram);
   } else {
     failures++;
   }
@@ -291,6 +340,7 @@ int main(void) {
   printf("fake device tree: %s\n", fake_root);
 
   test_gddr6_sensors();
+  test_answers_that_are_no_temperature();
   test_blackwell_sensors();
   test_uncovered_devices();
 

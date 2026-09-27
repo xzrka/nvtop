@@ -72,9 +72,11 @@
 #define GDDR7_CODE_MAX 80u
 #define GDDR7_DEGREES_PER_CODE 2u
 
-// A register the controller does not drive answers with this pattern
-#define GDDR7_POISON_MASK 0xFFFF0000u
-#define GDDR7_POISON_VALUE 0xBADF0000u
+// A register nothing drives answers with this pattern, whichever family the board
+// is of: it is what the GPU returns for an offset it does not implement, and it
+// decodes into a plausible looking temperature unless it is turned down first
+#define REGISTER_POISON_MASK 0xFFFF0000u
+#define REGISTER_POISON_VALUE 0xBADF0000u
 
 // Blackwell controllers, which read their sensors from another set of registers
 #define PCI_DEVICE_ID_RTX_5090 0x2B85u
@@ -311,10 +313,12 @@ static unsigned int hottest(unsigned int first, unsigned int second) {
   return first > second ? first : second;
 }
 
-static bool is_gddr7_poison(uint32_t raw) { return (raw & GDDR7_POISON_MASK) == GDDR7_POISON_VALUE; }
+// A register nothing drives, which is what reading an unimplemented offset of the
+// memory controller gives back
+static bool is_poisoned(uint32_t raw) { return (raw & REGISTER_POISON_MASK) == REGISTER_POISON_VALUE; }
 
 static bool decode_gddr6_junction(uint32_t raw, unsigned int *celsius) {
-  if (raw == UINT32_MAX)
+  if (raw == UINT32_MAX || is_poisoned(raw))
     return false;
 
   unsigned int value = (raw >> GDDR6_JUNCTION_SHIFT) & GDDR6_JUNCTION_MASK;
@@ -326,10 +330,18 @@ static bool decode_gddr6_junction(uint32_t raw, unsigned int *celsius) {
 }
 
 static bool decode_gddr6_vram(uint32_t raw, unsigned int *celsius) {
-  if (raw == UINT32_MAX)
+  if (raw == UINT32_MAX || is_poisoned(raw))
     return false;
 
-  unsigned int value = (raw & GDDR6_VRAM_ADC_MASK) / GDDR6_VRAM_ADC_DIVISOR;
+  unsigned int counts = raw & GDDR6_VRAM_ADC_MASK;
+  // A converter reading nothing. It is not the cold of a machine that has just
+  // been switched on either: the memory of a board whose die reports 69C cannot sit
+  // at the freezing point of water, and the boards that wire no thermistor to this
+  // converter answer 0 forever, beside a junction register that reads perfectly.
+  if (!counts)
+    return false;
+
+  unsigned int value = counts / GDDR6_VRAM_ADC_DIVISOR;
   if (value >= GDDR6_TEMP_LIMIT_C)
     return false;
 
@@ -339,7 +351,7 @@ static bool decode_gddr6_vram(uint32_t raw, unsigned int *celsius) {
 
 // Blackwell reports its temperatures as a fixed point value in 1/256 °C
 static bool decode_blackwell_temperature(uint32_t raw, unsigned int *celsius) {
-  if (raw == UINT32_MAX)
+  if (raw == UINT32_MAX || is_poisoned(raw))
     return false;
 
   uint32_t fixed = raw & BLACKWELL_THERM_VALUE_MASK;
@@ -351,7 +363,7 @@ static bool decode_blackwell_temperature(uint32_t raw, unsigned int *celsius) {
 }
 
 static bool decode_gddr7_vram(uint32_t raw, unsigned int *celsius) {
-  if (raw == UINT32_MAX || is_gddr7_poison(raw))
+  if (raw == UINT32_MAX || is_poisoned(raw))
     return false;
 
   unsigned int code = (raw >> GDDR7_TEMP_CODE_SHIFT) & GDDR7_TEMP_CODE_MASK;
@@ -376,7 +388,7 @@ static gddr7_topology detect_gddr7_topology(struct bar0_location *bar, long page
   uint32_t strap = read32(registers, 0);
   munmap(mapping, mapping_size);
 
-  if (!strap || strap == UINT32_MAX || is_gddr7_poison(strap))
+  if (!strap || strap == UINT32_MAX || is_poisoned(strap))
     return gddr7_topology_unknown;
 
   return (strap & (1u << GDDR7_STRAP_X16_BIT)) ? gddr7_topology_clamshell : gddr7_topology_standard;
@@ -515,7 +527,7 @@ bool nvidia_vram_temps_read(const nvidia_vram_temps *temps, unsigned int *juncti
       for (unsigned int fbpa = 0; fbpa < fbpa_count; ++fbpa) {
         size_t fbpa_offset = (size_t)fbpa * GDDR7_DQR_STRIDE;
         uint32_t valid = read32(temps->vram_regs, fbpa_offset + GDDR7_DQR_VALID_OFFSET);
-        if (valid == UINT32_MAX || is_gddr7_poison(valid))
+        if (valid == UINT32_MAX || is_poisoned(valid))
           continue;
 
         for (unsigned int sub = 0; sub < GDDR7_DQR_SUBREGISTER_COUNT; ++sub) {

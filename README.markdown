@@ -137,7 +137,9 @@ reports. They are worth watching because the core temperature is the die reporti
 on itself while the memory runs hotter, and on these boards the memory is what the
 fan curve is really protecting. Boards that predate GDDR6 do not carry the sensors
 and are not read at all. Only the hottest junction channel and the hottest memory
-device are reported.
+device are reported. Where a sensor answers with nothing, an offset the controller
+does not implement or a converter with no thermistor wired to it, the field says
+`N/A` rather than a temperature that only looks like one.
 
 Mapping those registers needs read access to the BAR0 of the GPU, which by default
 only the super user has, so under a plain user account the two fields are absent
