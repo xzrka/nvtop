@@ -48,7 +48,7 @@ static const char *allMessages[] = {
     "Nvtop won't be able to show AMD GPU processes on your kernel version (requires Linux >= 5.14)",
     "Nvtop won't be able to show Intel GPU utilization and processes on your kernel version (requires Linux >= 5.19)",
     "This version of Nvtop does not yet support reporting all data for MSM GPUs, such as power, fan and temperature information",
-    "Junction and memory temperatures could not be read on some NVIDIA GPUs: their registers may only be mapped by the super user (sudo nvtop)",
+    "Junction and memory temperatures could not be read on some NVIDIA GPUs: mapping their registers needs the super user, or read permission on the BAR0 of the GPU (see README)",
 };
 static const char *message_array[sizeof(allMessages) / sizeof(*allMessages)];
 

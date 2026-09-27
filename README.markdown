@@ -135,11 +135,35 @@ junction, also called hot spot) and `VRAM` (the memory devices), come from
 registers of the GDDR6/GDDR6X/GDDR7 memory controller that no supported API
 reports. They are worth watching because the core temperature is the die reporting
 on itself while the memory runs hotter, and on these boards the memory is what the
-fan curve is really protecting. Mapping those registers needs read access to the
-BAR0 of the GPU, that is the super user, so under a plain user account the two
-fields are absent and a message says so at startup. Boards that predate GDDR6 do
-not carry the sensors and are not read at all. Only the hottest junction channel and
-the hottest memory device are reported.
+fan curve is really protecting. Boards that predate GDDR6 do not carry the sensors
+and are not read at all. Only the hottest junction channel and the hottest memory
+device are reported.
+
+Mapping those registers needs read access to the BAR0 of the GPU, which by default
+only the super user has, so under a plain user account the two fields are absent
+and a message says so at startup. That access does not need the super user though,
+only permission on one file: the registers are reached through
+`/sys/bus/pci/devices/*/*/resource0`, and the kernel path that maps it,
+`pci_mmap_resource()` in `drivers/pci/pci-sysfs.c` and `pci_mmap_resource_range()`
+in `drivers/pci/mmap.c`, asks for no capability of its own. The `0600 root:root`
+mode of that file is the whole of the gate, so a udev rule handing it to a group,
+read only, is enough:
+
+```
+# /etc/udev/rules.d/99-nvtop-gpu-bars.rules
+# The memory temperatures of an NVIDIA GPU are registers in its first BAR, read for
+# the members of gpuview instead of only for root. Read only, so the registers may
+# not be written through it.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x03*", \
+  RUN+="/bin/chgrp gpuview /sys%p/resource0", RUN+="/bin/chmod 0440 /sys%p/resource0"
+```
+
+The resource files of a PCI device are created when a driver binds it, later than
+the add event of the device itself, so a rule can find no file to set: run the same
+two commands again once the driver is up, and after every reload of it. Where the
+driver has claimed the region exclusively the mapping answers `EBUSY`, and there
+`sudo nvtop` has it; the `/dev/mem` of those boards needs `iomem=relaxed` on the
+kernel command line, which is a wider door than the group above.
 
 The register layouts and their decodings are ported from
 [gddr6-core-junction-vram-temps](https://github.com/ThomasBaruzier/gddr6-core-junction-vram-temps),
