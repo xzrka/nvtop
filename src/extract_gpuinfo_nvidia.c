@@ -21,6 +21,7 @@
 
 #include "nvtop/common.h"
 #include "nvtop/extract_gpuinfo_common.h"
+#include "nvtop/nvidia_vram_temps.h"
 #include "nvtop/time.h"
 
 #include <dlfcn.h>
@@ -651,6 +652,13 @@ struct gpu_info_nvidia {
   // NVML calls and CLI forks on every draw cycle.
   struct nvlink_info cached_nvlink_info;
   bool cached_nvlink_info_populated;
+
+  // Junction and memory temperatures read from the memory controller registers.
+  // Mapping them needs a permission a plain user does not have, so the outcome of
+  // the first attempt is kept: no device is asked again on every refresh.
+  nvidia_vram_temps *vram_temps;
+  enum gpu_extra_temps_support extra_temps_support;
+  bool extra_temps_resolved;
 };
 
 static LIST_HEAD(allocations);
@@ -666,6 +674,10 @@ static void gpuinfo_nvidia_get_running_processes(struct gpu_info *_gpu_info);
 // Forward declaration for nvlink_refresh_cached_info (defined later, called from refresh_dynamic_info)
 // Populates gpu_info->cached_nvlink_info with throughput + error data.
 static void nvlink_refresh_cached_info(struct gpu_info_nvidia *gpu_info, unsigned int linkCount);
+
+// Maps the junction and memory temperature registers of one GPU, once, and keeps
+// the outcome whether it worked or not (defined with the other sensors below).
+static void nvidia_setup_vram_temps(struct gpu_info_nvidia *gpu_info);
 
 // Remap raw NVML NVLink protocol version to the marketing version (forward declaration)
 static unsigned int nvlink_marketing_version(unsigned int raw_version);
@@ -907,6 +919,7 @@ static bool gpuinfo_nvidia_init(void) {
 
 static void gpuinfo_nvidia_shutdown(void) {
   gpuinfo_nvidia_nvapi_shutdown();
+  nvidia_vram_temps_close_all();
 
   if (libnvidia_ml_handle) {
     nvmlShutdown();
@@ -1058,6 +1071,15 @@ static void gpuinfo_nvidia_populate_static_info(struct gpu_info *_gpu_info) {
                                                               &static_info->temperature_slowdown_threshold);
   if (last_nvml_return_status == NVML_SUCCESS)
     SET_VALID(gpuinfo_temperature_slowdown_threshold_valid, static_info->valid);
+
+  // The memory ceiling, which the drivers of datacenter cards report and GeForce
+  // ones do not; the junction and memory fields stay uncolored without it.
+  if (nvmlDeviceGetTemperatureThreshold) {
+    last_nvml_return_status = nvmlDeviceGetTemperatureThreshold(device, NVML_TEMPERATURE_THRESHOLD_MEM_MAX,
+                                                                &static_info->temperature_memory_max_threshold);
+    if (last_nvml_return_status == NVML_SUCCESS)
+      SET_VALID(gpuinfo_temperature_memory_max_threshold_valid, static_info->valid);
+  }
 }
 
 static void gpuinfo_nvidia_refresh_dynamic_info(struct gpu_info *_gpu_info) {
@@ -1231,6 +1253,18 @@ static void gpuinfo_nvidia_refresh_dynamic_info(struct gpu_info *_gpu_info) {
   last_nvml_return_status = nvmlDeviceGetTemperature(device, NVML_TEMPERATURE_GPU, &dynamic_info->gpu_temp);
   if (last_nvml_return_status == NVML_SUCCESS)
     SET_VALID(gpuinfo_gpu_temp_valid, dynamic_info->valid);
+
+  // Junction and memory temperatures, which the core temperature above says
+  // nothing about: the memory runs hotter than the die reporting itself does.
+  nvidia_setup_vram_temps(gpu_info);
+  unsigned int junction_temp = NVTOP_TEMPERATURE_INVALID;
+  unsigned int vram_temp = NVTOP_TEMPERATURE_INVALID;
+  if (nvidia_vram_temps_read(gpu_info->vram_temps, &junction_temp, &vram_temp)) {
+    if (junction_temp != NVTOP_TEMPERATURE_INVALID)
+      SET_GPUINFO_DYNAMIC(dynamic_info, junction_temp, junction_temp);
+    if (vram_temp != NVTOP_TEMPERATURE_INVALID)
+      SET_GPUINFO_DYNAMIC(dynamic_info, vram_temp, vram_temp);
+  }
 
   // Device power usage
   last_nvml_return_status = nvmlDeviceGetPowerUsage(device, &dynamic_info->power_draw);
@@ -1810,4 +1844,83 @@ bool nvtop_get_ecc_support(struct gpu_info *_gpu_info) {
   nvmlReturn_t ret =
       nvmlDeviceGetTotalEccErrors(gpu_info->gpuhandle, NVML_MEMORY_ERROR_TYPE_CORRECTED, NVML_VOLATILE_ECC, &ecc_count);
   return ret == NVML_SUCCESS;
+}
+
+// The junction and memory temperatures are read from registers of the memory
+// controller, see nvidia_vram_temps.h. Boards that predate GDDR6 do not carry the
+// sensors, and the offsets they have instead only answer with their own contents,
+// so they are left alone.
+static bool device_may_have_vram_sensors(unsigned int architecture) {
+  switch (architecture) {
+  case NVML_DEVICE_ARCH_KEPLER:
+  case NVML_DEVICE_ARCH_MAXWELL:
+  case NVML_DEVICE_ARCH_PASCAL:
+  case NVML_DEVICE_ARCH_VOLTA:
+  case NVML_DEVICE_ARCH_TURING:
+    return false;
+  // Accelerators on a Tegra package have no memory of their own to watch
+  case NVML_DEVICE_ARCH_DLA:
+  case NVML_DEVICE_ARCH_DLA2:
+  case NVML_DEVICE_ARCH_NPU3:
+    return false;
+  default:
+    break;
+  }
+
+  // A driver that reports no architecture leaves it to the registers themselves
+  return true;
+}
+
+static void nvidia_setup_vram_temps(struct gpu_info_nvidia *gpu_info) {
+  if (gpu_info->extra_temps_resolved)
+    return;
+
+  gpu_info->extra_temps_resolved = true;
+  gpu_info->extra_temps_support = gpu_extra_temps_none;
+
+  if (!nvmlDeviceGetPciInfo)
+    return;
+
+  nvmlPciInfo_t pciInfo;
+  if (nvmlDeviceGetPciInfo(gpu_info->gpuhandle, &pciInfo) != NVML_SUCCESS)
+    return;
+
+  unsigned int architecture = NVML_DEVICE_ARCH_UNKNOWN;
+  if (nvmlDeviceGetArchitecture)
+    (void)nvmlDeviceGetArchitecture(gpu_info->gpuhandle, &architecture);
+
+  // NVML reports the device id in the upper half of the PCI device identifier
+  enum nvidia_vram_temps_status status = nvidia_vram_temps_unsupported;
+  gpu_info->vram_temps = nvidia_vram_temps_open(pciInfo.domain, pciInfo.bus, pciInfo.device, 0,
+                                                (uint16_t)(pciInfo.pciDeviceId >> 16),
+                                                device_may_have_vram_sensors(architecture), &status);
+
+  switch (status) {
+  case nvidia_vram_temps_ok:
+    gpu_info->extra_temps_support = gpu_extra_temps_available;
+    break;
+  // The registers exist for this board but may not be mapped, which is the answer
+  // a plain user gets and the one worth telling the user about
+  case nvidia_vram_temps_no_access:
+    gpu_info->extra_temps_support = gpu_extra_temps_no_permission;
+    break;
+  case nvidia_vram_temps_unsupported:
+  case nvidia_vram_temps_no_bar0:
+  default:
+    gpu_info->extra_temps_support = gpu_extra_temps_none;
+    break;
+  }
+}
+
+// Junction and memory temperatures: how far this device can report them. The two
+// negative answers differ by what the user may do about it: a board without the
+// sensors stays quiet, a board that could not be mapped says so once at startup.
+enum gpu_extra_temps_support nvtop_get_extra_temps_support(struct gpu_info *_gpu_info) {
+  // These registers are specific to NVIDIA controllers
+  if (!_gpu_info || strcmp(_gpu_info->vendor->name, "NVIDIA"))
+    return gpu_extra_temps_none;
+
+  struct gpu_info_nvidia *gpu_info = container_of(_gpu_info, struct gpu_info_nvidia, base);
+  nvidia_setup_vram_temps(gpu_info);
+  return gpu_info->extra_temps_support;
 }

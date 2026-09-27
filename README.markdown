@@ -130,6 +130,23 @@ library* (`libnvidia-api.so.1`) that recent drivers install alongside NVML;
 without it the rest of the interface is unaffected and the bar takes no room on
 a GPU that reports nothing.
 
+The two temperatures on the device header besides `TEMP`, `JCT` (the memory
+junction, also called hot spot) and `VRAM` (the memory devices), come from
+registers of the GDDR6/GDDR6X/GDDR7 memory controller that no supported API
+reports. They are worth watching because the core temperature is the die reporting
+on itself while the memory runs hotter, and on these boards the memory is what the
+fan curve is really protecting. Mapping those registers needs read access to the
+BAR0 of the GPU, that is the super user, so under a plain user account the two
+fields are absent and a message says so at startup. Boards that predate GDDR6 do
+not carry the sensors and are not read at all. Only the hottest junction channel and
+the hottest memory device are reported.
+
+The register layouts and their decodings are ported from
+[gddr6-core-junction-vram-temps](https://github.com/ThomasBaruzier/gddr6-core-junction-vram-temps),
+which credits the measurements of olealgoritme, jjziets, igor'sLAB and
+sunnyyangyangyang. Reading undocumented registers is what it is: the values are
+reported as they read, without warranty.
+
 ### Adreno
 
 NVTOP supports Adreno GPUs using the `msm` linux driver.

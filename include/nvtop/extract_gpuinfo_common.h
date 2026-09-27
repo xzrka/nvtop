@@ -58,6 +58,7 @@ enum gpuinfo_static_info_valid {
   gpuinfo_max_pcie_link_width_valid,
   gpuinfo_temperature_shutdown_threshold_valid,
   gpuinfo_temperature_slowdown_threshold_valid,
+  gpuinfo_temperature_memory_max_threshold_valid,
   gpuinfo_n_shared_cores_valid,
   gpuinfo_l2cache_size_valid,
   gpuinfo_n_exec_engines_valid,
@@ -75,6 +76,9 @@ struct gpuinfo_static_info {
   unsigned max_pcie_link_width;
   unsigned temperature_shutdown_threshold;
   unsigned temperature_slowdown_threshold;
+  // The memory ceiling the driver reports, the limit the junction and memory
+  // temperatures have to be judged against rather than the core ones
+  unsigned temperature_memory_max_threshold;
   unsigned n_shared_cores;
   unsigned l2cache_size;
   unsigned n_exec_engines;
@@ -109,6 +113,8 @@ enum gpuinfo_dynamic_info_valid {
   gpuinfo_fan_speed_valid,
   gpuinfo_fan_rpm_valid,
   gpuinfo_gpu_temp_valid,
+  gpuinfo_junction_temp_valid,
+  gpuinfo_vram_temp_valid,
   gpuinfo_power_draw_valid,
   gpuinfo_power_draw_max_valid,
   gpuinfo_effective_load_rate_valid,
@@ -154,6 +160,8 @@ struct gpuinfo_dynamic_info {
   unsigned int fan_speed;             // Fan speed percentage
   unsigned int fan_rpm;               // Fan speed RPM
   unsigned int gpu_temp;              // GPU temperature °Celsius
+  unsigned int junction_temp;         // Memory junction / hot spot temperature °Celsius
+  unsigned int vram_temp;             // Memory device temperature °Celsius
   unsigned int power_draw;            // Power usage in milliwatts
   unsigned int power_draw_max;        // Max power usage in milliwatts
   bool multi_instance_mode;           // True if the GPU is in multi-instance mode
@@ -326,5 +334,22 @@ bool nvtop_get_ecc_support(struct gpu_info *gpu_info);
 // ECC probe — call before initialize_curses so the layout only reserves room for
 // the ECC field when a monitored GPU actually supports ECC.
 bool nvtop_probe_ecc_list(struct list_head *devices);
+
+// How far a device is in reporting the junction and memory temperatures that sit
+// next to the core one, which no supported API exposes on some vendors. The two
+// sensors are read from registers only the super user may map, so "exists but may
+// not be read" is a different answer from "this device has no such sensor".
+enum gpu_extra_temps_support {
+  gpu_extra_temps_none = 0,      // Nothing to read on this device
+  gpu_extra_temps_available,     // The sensors were read at least once
+  gpu_extra_temps_no_permission, // The sensors are there but may not be mapped
+  gpu_extra_temps_support_count,
+};
+
+enum gpu_extra_temps_support nvtop_get_extra_temps_support(struct gpu_info *gpu_info);
+
+// Probe — call before initialize_curses so the layout only reserves room for the
+// junction and memory temperature fields when a monitored GPU reports them.
+bool nvtop_probe_extra_temps_list(struct list_head *devices);
 
 #endif // EXTRACT_GPUINFO_COMMON_H__

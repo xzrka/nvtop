@@ -41,12 +41,14 @@ enum messages {
   AMD_GPU_514,
   INTEL_GPU_519,
   MSM_GPU,
+  NVIDIA_EXTRA_TEMPS_NO_PERMISSION,
 };
 
 static const char *allMessages[] = {
     "Nvtop won't be able to show AMD GPU processes on your kernel version (requires Linux >= 5.14)",
     "Nvtop won't be able to show Intel GPU utilization and processes on your kernel version (requires Linux >= 5.19)",
     "This version of Nvtop does not yet support reporting all data for MSM GPUs, such as power, fan and temperature information",
+    "Junction and memory temperatures could not be read on some NVIDIA GPUs: their registers may only be mapped by the super user (sudo nvtop)",
 };
 static const char *message_array[sizeof(allMessages) / sizeof(*allMessages)];
 
@@ -60,6 +62,7 @@ void get_info_messages(struct list_head *devices, unsigned *num_messages, const 
   bool hasIntel = false;
   bool hasMSM = false;
   bool hasAMD = false;
+  bool hasNvidiaTempsBlocked = false;
   struct gpu_info *gpuinfo;
   list_for_each_entry(gpuinfo, devices, list) {
     if (strcmp(gpuinfo->vendor->name, "Intel") == 0) {
@@ -71,6 +74,10 @@ void get_info_messages(struct list_head *devices, unsigned *num_messages, const 
     if (strcmp(gpuinfo->vendor->name, "AMD") == 0) {
       hasAMD = true;
     }
+    // The junction and memory sensors are there for this board, but the registers
+    // holding them could not be mapped
+    if (nvtop_get_extra_temps_support(gpuinfo) == gpu_extra_temps_no_permission)
+      hasNvidiaTempsBlocked = true;
   }
   if (hasAMD) {
     if (linux_major < 5 || (linux_major == 5 && linux_minor < 14)) {
@@ -84,5 +91,8 @@ void get_info_messages(struct list_head *devices, unsigned *num_messages, const 
   }
   if (hasMSM) {
     message_array[(*num_messages)++] = allMessages[MSM_GPU];
+  }
+  if (hasNvidiaTempsBlocked) {
+    message_array[(*num_messages)++] = allMessages[NVIDIA_EXTRA_TEMPS_NO_PERMISSION];
   }
 }

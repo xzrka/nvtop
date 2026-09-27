@@ -72,6 +72,10 @@ struct device_window {
   WINDOW *encdec_util;
   WINDOW *fan_speed;
   WINDOW *temperature;
+  // Junction and memory temperatures, allocated only for the GPUs that report
+  // them so that the rest keep the panel width they had
+  WINDOW *junction_temp;
+  WINDOW *vram_temp;
   WINDOW *power_info;
   WINDOW *ecc_info;
   WINDOW *gpu_clock_info;
@@ -158,6 +162,8 @@ enum device_field {
   device_name = 0,
   device_fan_speed,
   device_temperature,
+  device_junction_temp,
+  device_vram_temp,
   device_power,
   device_ecc,
   device_pcie,

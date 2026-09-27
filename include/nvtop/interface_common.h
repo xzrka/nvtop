@@ -37,6 +37,10 @@ enum plot_information {
   plot_pcie_tx_rate,
   plot_hvx_util_rate,
   plot_hmx_util_rate,
+  // Kept at the end: the plot set a device draws is saved by name in the config
+  // file, so an entry may not shift the ones beside it.
+  plot_junction_temperature,
+  plot_vram_temperature,
   plot_information_count
 };
 

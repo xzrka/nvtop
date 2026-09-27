@@ -50,7 +50,7 @@
 static unsigned int sizeof_device_field[device_field_count] = {
     [device_name] = 11,          [device_fan_speed] = 11,  [device_temperature] = 10, [device_power] = 15,
     [device_ecc] = 10,           [device_clock] = 11,      [device_mem_clock] = 12,   [device_pcie] = 46,
-    [device_nvlink_errors] = 33, [device_extra_info] = 15,
+    [device_nvlink_errors] = 33, [device_extra_info] = 15, [device_junction_temp] = 10, [device_vram_temp] = 11,
 };
 
 // True if any monitored device has NVLink hardware support (even if 0 links active).
@@ -124,6 +124,36 @@ bool nvtop_probe_ecc_list(struct list_head *devices) {
   return has_ecc;
 }
 
+// True once a monitored device reports the junction and memory temperatures that sit
+// next to the core one. Controls whether line 2 reserves room for them, so a device
+// with nothing to report costs no panel width.
+static bool any_device_has_extra_temps = false;
+
+bool nvtop_probe_extra_temps_list(struct list_head *devices) {
+  // The backends cache the outcome per device, so asking again costs nothing. The
+  // reservation is never given back while running, which would move the layout
+  // under the user.
+  struct gpu_info *gpu;
+  list_for_each_entry(gpu, devices, list) {
+    if (nvtop_get_extra_temps_support(gpu) == gpu_extra_temps_available) {
+      any_device_has_extra_temps = true;
+      break;
+    }
+  }
+
+  return any_device_has_extra_temps;
+}
+
+// Width the junction and memory fields take on line 2, zero where no monitored
+// device reports them. Shared by the allocation and the panel width computation so
+// the two cannot drift apart.
+static unsigned int extra_temps_line2_width(unsigned int spacer) {
+  if (!any_device_has_extra_temps)
+    return 0;
+
+  return sizeof_device_field[device_junction_temp] + sizeof_device_field[device_vram_temp] + 2u * spacer;
+}
+
 static unsigned int sizeof_process_field[process_field_count] = {
     [process_pid] = 7,       [process_user] = 4,          [process_gpu_id] = 3,   [process_type] = 8,
     [process_gpu_rate] = 4,  [process_enc_rate] = 4,      [process_dec_rate] = 4,
@@ -137,8 +167,8 @@ static unsigned int sizeof_process_field[process_field_count] = {
 // and the reserved panel width can never drift apart.
 static unsigned int nvlink_line2_start(unsigned int spacer) {
   unsigned int start = spacer * 6 + sizeof_device_field[device_clock] + sizeof_device_field[device_mem_clock] +
-                       sizeof_device_field[device_temperature] + sizeof_device_field[device_fan_speed] +
-                       sizeof_device_field[device_power];
+                       sizeof_device_field[device_temperature] + extra_temps_line2_width(spacer) +
+                       sizeof_device_field[device_fan_speed] + sizeof_device_field[device_power];
   if (any_device_has_ecc)
     start += sizeof_device_field[device_ecc];
   return start;
@@ -153,6 +183,7 @@ static void alloc_device_window(unsigned int start_row, unsigned int start_col, 
                                 struct device_window *dwin) {
 
   const unsigned int spacer = 1;
+  const unsigned int extra_temps = extra_temps_line2_width(spacer);
 
   // Not every info slot gets a window, so the unused ones have to read as
   // absent rather than as leftovers of the previous layout
@@ -168,7 +199,7 @@ static void alloc_device_window(unsigned int start_row, unsigned int start_col, 
   if (dwin->pcie_info == NULL)
     goto alloc_error;
 
-  // Line 2 = GPU clk | MEM clk | Temp | Fan | Power | NVLink
+  // Line 2 = GPU clk | MEM clk | Temp | Junction | VRAM | Fan | Power | NVLink
   dwin->gpu_clock_info = newwin(1, sizeof_device_field[device_clock], start_row + 1, start_col);
   if (dwin->gpu_clock_info == NULL)
     goto alloc_error;
@@ -181,24 +212,42 @@ static void alloc_device_window(unsigned int start_row, unsigned int start_col, 
              start_col + spacer * 2 + sizeof_device_field[device_clock] + sizeof_device_field[device_mem_clock]);
   if (dwin->temperature == NULL)
     goto alloc_error;
+  // The two temperatures the core one says nothing about, where they are reported
+  dwin->junction_temp = NULL;
+  dwin->vram_temp = NULL;
+  if (any_device_has_extra_temps) {
+    dwin->junction_temp = newwin(1, sizeof_device_field[device_junction_temp], start_row + 1,
+                                 start_col + spacer * 3 + sizeof_device_field[device_clock] +
+                                     sizeof_device_field[device_mem_clock] + sizeof_device_field[device_temperature]);
+    if (dwin->junction_temp == NULL)
+      goto alloc_error;
+    dwin->vram_temp =
+        newwin(1, sizeof_device_field[device_vram_temp], start_row + 1,
+               start_col + spacer * 4 + sizeof_device_field[device_clock] + sizeof_device_field[device_mem_clock] +
+                   sizeof_device_field[device_temperature] + sizeof_device_field[device_junction_temp]);
+    if (dwin->vram_temp == NULL)
+      goto alloc_error;
+  }
   dwin->fan_speed = newwin(1, sizeof_device_field[device_fan_speed], start_row + 1,
                            start_col + spacer * 3 + sizeof_device_field[device_clock] +
-                               sizeof_device_field[device_mem_clock] + sizeof_device_field[device_temperature]);
+                               sizeof_device_field[device_mem_clock] + sizeof_device_field[device_temperature] +
+                               extra_temps);
   if (dwin->fan_speed == NULL)
     goto alloc_error;
   dwin->power_info =
       newwin(1, sizeof_device_field[device_power], start_row + 1,
              start_col + spacer * 4 + sizeof_device_field[device_clock] + sizeof_device_field[device_mem_clock] +
-                 sizeof_device_field[device_temperature] + sizeof_device_field[device_fan_speed]);
+                 sizeof_device_field[device_temperature] + extra_temps + sizeof_device_field[device_fan_speed]);
   if (dwin->power_info == NULL)
     goto alloc_error;
   // ECC errors appended to power_info on the same row (start_row + 1), only when
   // at least one monitored GPU exposes ECC counters.
   if (any_device_has_ecc) {
-    dwin->ecc_info = newwin(1, sizeof_device_field[device_ecc], start_row + 1,
-                            start_col + spacer * 5 + sizeof_device_field[device_clock] +
-                                sizeof_device_field[device_mem_clock] + sizeof_device_field[device_temperature] +
-                                sizeof_device_field[device_fan_speed] + sizeof_device_field[device_power]);
+    dwin->ecc_info =
+        newwin(1, sizeof_device_field[device_ecc], start_row + 1,
+               start_col + spacer * 5 + sizeof_device_field[device_clock] + sizeof_device_field[device_mem_clock] +
+                   sizeof_device_field[device_temperature] + extra_temps + sizeof_device_field[device_fan_speed] +
+                   sizeof_device_field[device_power]);
     if (dwin->ecc_info == NULL)
       goto alloc_error;
   } else {
@@ -333,6 +382,10 @@ static void free_device_windows(struct device_window *dwin) {
   if (dwin->ecc_info != NULL)
     delwin(dwin->ecc_info);
   delwin(dwin->temperature);
+  if (dwin->junction_temp != NULL)
+    delwin(dwin->junction_temp);
+  if (dwin->vram_temp != NULL)
+    delwin(dwin->vram_temp);
   delwin(dwin->fan_speed);
   delwin(dwin->pcie_info);
   if (dwin->nvlink_info != NULL)
@@ -498,11 +551,11 @@ static unsigned device_length(void) {
   unsigned line1 = sizeof_device_field[device_name] + sizeof_device_field[device_pcie] + 1;
 
   // Line 2 base: clock, mem_clock, temp, fan, power + spacers (4 spacers + 1 = 5)
-  // ECC is only counted when a monitored GPU actually supports it, so consumer
-  // systems keep the original narrower panel width.
+  // ECC and the junction/memory temperatures are only counted where a monitored
+  // GPU reports them, so consumer systems keep the original narrower panel width.
   unsigned line2 = sizeof_device_field[device_clock] + sizeof_device_field[device_mem_clock] +
-                   sizeof_device_field[device_temperature] + sizeof_device_field[device_fan_speed] +
-                   sizeof_device_field[device_power] + 5;
+                   sizeof_device_field[device_temperature] + extra_temps_line2_width(spacer) +
+                   sizeof_device_field[device_fan_speed] + sizeof_device_field[device_power] + 5;
   if (any_device_has_ecc)
     line2 += sizeof_device_field[device_ecc] + 1;
 
@@ -737,6 +790,48 @@ static void draw_temp_color(WINDOW *win, unsigned int temp, unsigned int temp_sl
     waddch(win, 'C');
   else
     waddch(win, 'F');
+  wnoutrefresh(win);
+}
+
+// One of the temperatures that sit next to the core one: the memory junction and
+// the memory itself. Only the ceiling the driver reports for the memory may color
+// them; where it reports none, as GeForce drivers do, the value stands on its own
+// rather than against a limit nvtop would have invented.
+static void draw_extra_temp(WINDOW *win, const char *label, unsigned int temp, unsigned int temp_max,
+                           bool has_temp_max, bool celsius) {
+  unsigned int temp_convert;
+  if (celsius)
+    temp_convert = temp;
+  else
+    temp_convert = (unsigned)(32 + nearbyint(temp * 1.8));
+
+  wcolor_set(win, cyan_color, NULL);
+  mvwprintw(win, 0, 0, "%s", label);
+
+  if (has_temp_max) {
+    if (temp >= temp_max)
+      wcolor_set(win, red_color, NULL);
+    else if (temp + 10 >= temp_max)
+      wcolor_set(win, yellow_color, NULL);
+    else
+      wcolor_set(win, green_color, NULL);
+  }
+  wprintw(win, " %3u", temp_convert);
+  wstandend(win);
+
+  waddch(win, ACS_DEGREE);
+  if (celsius)
+    waddch(win, 'C');
+  else
+    waddch(win, 'F');
+  wnoutrefresh(win);
+}
+
+// A sensor this device does not report, so that an empty field is not mistaken for
+// a temperature of zero.
+static void draw_extra_temp_unavailable(WINDOW *win, const char *label) {
+  mvwprintw(win, 0, 0, "%s N/A", label);
+  mvwchgat(win, 0, 0, (int)strlen(label), 0, cyan_color, NULL);
   wnoutrefresh(win);
 }
 
@@ -1080,6 +1175,30 @@ static void draw_devices(struct list_head *devices, struct nvtop_interface *inte
         waddch(dev->temperature, 'C');
       mvwchgat(dev->temperature, 0, 0, 4, 0, cyan_color, NULL);
       wnoutrefresh(dev->temperature);
+    }
+
+    // Junction and memory temperatures, on the GPUs that report them. The core one
+    // above says nothing about how hot the memory runs, which is the point of
+    // showing them next to it.
+    if (dev->junction_temp != NULL) {
+      werase(dev->junction_temp);
+      if (GPUINFO_DYNAMIC_FIELD_VALID(&device->dynamic_info, junction_temp))
+        draw_extra_temp(dev->junction_temp, "JCT", device->dynamic_info.junction_temp,
+                        device->static_info.temperature_memory_max_threshold,
+                        GPUINFO_STATIC_FIELD_VALID(&device->static_info, temperature_memory_max_threshold),
+                        !interface->options.temperature_in_fahrenheit);
+      else
+        draw_extra_temp_unavailable(dev->junction_temp, "JCT");
+    }
+    if (dev->vram_temp != NULL) {
+      werase(dev->vram_temp);
+      if (GPUINFO_DYNAMIC_FIELD_VALID(&device->dynamic_info, vram_temp))
+        draw_extra_temp(dev->vram_temp, "VRAM", device->dynamic_info.vram_temp,
+                        device->static_info.temperature_memory_max_threshold,
+                        GPUINFO_STATIC_FIELD_VALID(&device->static_info, temperature_memory_max_threshold),
+                        !interface->options.temperature_in_fahrenheit);
+      else
+        draw_extra_temp_unavailable(dev->vram_temp, "VRAM");
     }
 
     // FAN
@@ -2174,6 +2293,22 @@ void save_current_data_to_ring(struct list_head *devices, struct nvtop_interface
             data_val = device->dynamic_info.hmx_util_rate;
           }
           break;
+        // The temperatures share the 0-100 vertical axis of the plots, so they are
+        // capped the way the core temperature is
+        case plot_junction_temperature:
+          if (GPUINFO_DYNAMIC_FIELD_VALID(&device->dynamic_info, junction_temp)) {
+            data_val = device->dynamic_info.junction_temp;
+            if (data_val > 100)
+              data_val = 100u;
+          }
+          break;
+        case plot_vram_temperature:
+          if (GPUINFO_DYNAMIC_FIELD_VALID(&device->dynamic_info, vram_temp)) {
+            data_val = device->dynamic_info.vram_temp;
+            if (data_val > 100)
+              data_val = 100u;
+          }
+          break;
         case plot_information_count:
           break;
         }
@@ -2256,6 +2391,12 @@ static unsigned populate_plot_data_from_ring_buffer(struct list_head *devices, c
           break;
         case plot_pcie_tx_rate:
           snprintf(plot_legend[in_processing], PLOT_MAX_LEGEND_SIZE, "GPU%u PCIe TX%%", dev_id);
+          break;
+        case plot_junction_temperature:
+          snprintf(plot_legend[in_processing], PLOT_MAX_LEGEND_SIZE, "%s%u jct(c)", unit, dev_id);
+          break;
+        case plot_vram_temperature:
+          snprintf(plot_legend[in_processing], PLOT_MAX_LEGEND_SIZE, "%s%u vram(c)", unit, dev_id);
           break;
         case plot_information_count:
           break;
@@ -2613,6 +2754,13 @@ bool show_information_messages(unsigned num_messages, const char **messages) {
   return dontShowAgainOption;
 }
 
+// The snapshot reports temperatures in the unit the caller asked for
+static unsigned int snapshot_temperature(unsigned int temp, bool use_fahrenheit) {
+  if (!use_fahrenheit)
+    return temp;
+  return (unsigned)(32 + nearbyint(temp * 1.8));
+}
+
 void print_snapshot(struct list_head *devices, bool use_fahrenheit_option, bool hide_processes_option) {
   struct gpu_info *device;
 
@@ -2678,15 +2826,28 @@ void print_snapshot(struct list_head *devices, bool use_fahrenheit_option, bool 
 
     // GPU Temperature
     if (GPUINFO_DYNAMIC_FIELD_VALID(&device->dynamic_info, gpu_temp)) {
-      unsigned int temp_convert;
-      if (!use_fahrenheit_option)
-        temp_convert = device->dynamic_info.gpu_temp;
-      else
-        temp_convert = (unsigned)(32 + nearbyint(device->dynamic_info.gpu_temp * 1.8));
+      unsigned int temp_convert = snapshot_temperature(device->dynamic_info.gpu_temp, use_fahrenheit_option);
 
       printf("%s\"%s\": \"%u%s\",\n", indent_level_four, temp_field, temp_convert, use_fahrenheit_option ? "F" : "C");
     } else {
       printf("%s\"%s\": null,\n", indent_level_four, temp_field);
+    }
+
+    // Junction and memory temperatures, on the GPUs that report them
+    if (GPUINFO_DYNAMIC_FIELD_VALID(&device->dynamic_info, junction_temp)) {
+      unsigned int temp_convert = snapshot_temperature(device->dynamic_info.junction_temp, use_fahrenheit_option);
+
+      printf("%s\"junction_temp\": \"%u%s\",\n", indent_level_four, temp_convert, use_fahrenheit_option ? "F" : "C");
+    } else {
+      printf("%s\"junction_temp\": null,\n", indent_level_four);
+    }
+
+    if (GPUINFO_DYNAMIC_FIELD_VALID(&device->dynamic_info, vram_temp)) {
+      unsigned int temp_convert = snapshot_temperature(device->dynamic_info.vram_temp, use_fahrenheit_option);
+
+      printf("%s\"vram_temp\": \"%u%s\",\n", indent_level_four, temp_convert, use_fahrenheit_option ? "F" : "C");
+    } else {
+      printf("%s\"vram_temp\": null,\n", indent_level_four);
     }
 
     // Fan speed
